@@ -7,7 +7,24 @@ import { generateSummary } from "../services/summary.js";
 import { generateScorecard } from "../services/scorecard.js";
 import { analyzeEmotion } from "../services/emotion.js";
 import { embedBatch, chunkTranscript } from "../services/embeddings.js";
+import { notifyFailure } from "../services/notifications.js";
 import type { CallJobData } from "../queues/callQueue.js";
+
+// Custom error that carries which pipeline stage failed (for richer alerts)
+class StageError extends Error {
+  constructor(public stage: string, original: Error) {
+    super(original.message);
+    this.name = "StageError";
+  }
+}
+
+async function runStage<T>(stage: string, fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (err) {
+    throw new StageError(stage, err as Error);
+  }
+}
 
 async function updateCallStatus(
   callId: string,
@@ -37,7 +54,9 @@ async function processCall(job: Job<CallJobData>): Promise<void> {
   await updateCallStatus(callId, "transcribing");
   await job.updateProgress(10);
 
-  const transcript = await transcribeAudio(filePath, mimeType);
+  const transcript = await runStage("transcription", () =>
+    transcribeAudio(filePath, mimeType)
+  );
   await job.updateProgress(40);
 
   // Save transcript to DB
@@ -52,7 +71,9 @@ async function processCall(job: Job<CallJobData>): Promise<void> {
   await updateCallStatus(callId, "analysing");
   await job.updateProgress(50);
 
-  const diarization = await diarizeTranscript(transcript);
+  const diarization = await runStage("diarization", () =>
+    diarizeTranscript(transcript)
+  );
   await job.updateProgress(70);
 
   // Save diarization to DB
@@ -67,11 +88,13 @@ async function processCall(job: Job<CallJobData>): Promise<void> {
   // All three only depend on the diarized transcript, so we run concurrently.
   await job.updateProgress(75);
 
-  const [summary, scorecard, emotion] = await Promise.all([
-    generateSummary(diarization.formattedTranscript),
-    generateScorecard(diarization.formattedTranscript),
-    analyzeEmotion(diarization.segments),
-  ]);
+  const [summary, scorecard, emotion] = await runStage("analysis", () =>
+    Promise.all([
+      generateSummary(diarization.formattedTranscript),
+      generateScorecard(diarization.formattedTranscript),
+      analyzeEmotion(diarization.segments),
+    ])
+  );
 
   // Save all results to DB
   await pool.query(
@@ -88,7 +111,7 @@ async function processCall(job: Job<CallJobData>): Promise<void> {
 
   const chunks = chunkTranscript(diarization.formattedTranscript);
   if (chunks.length > 0) {
-    const vectors = await embedBatch(chunks);
+    const vectors = await runStage("embeddings", () => embedBatch(chunks));
 
     // Clear any existing chunks for this call (in case of reprocessing)
     await pool.query(`DELETE FROM call_chunks WHERE call_id = $1`, [callId]);
@@ -137,9 +160,35 @@ export function startWorker(): void {
 
     if (job) {
       const attempts = job.opts.attempts ?? 3;
+      // Only finalize + notify once all retries are exhausted
       if (job.attemptsMade >= attempts) {
-        await updateCallStatus(job.data.callId, "failed", {
+        const callId = job.data.callId;
+        const stage = err.name === "StageError" ? (err as StageError).stage : "processing";
+
+        await updateCallStatus(callId, "failed", {
           errorMessage: err.message,
+        });
+
+        // Look up the file name for richer alert context
+        let fileName = job.data.originalName ?? "unknown";
+        try {
+          const r = await pool.query<{ original_name: string }>(
+            `SELECT original_name FROM calls WHERE id = $1`,
+            [callId]
+          );
+          if (r.rows[0]) fileName = r.rows[0].original_name;
+        } catch {
+          // best-effort
+        }
+
+        // Fire notifications (Slack/email/console) — never blocks or throws
+        await notifyFailure({
+          callId,
+          fileName,
+          reason: err.message,
+          timestamp: new Date().toISOString(),
+          attemptsMade: job.attemptsMade,
+          stage,
         });
       }
     }
