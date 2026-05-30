@@ -3,6 +3,7 @@ import cors from "cors";
 import dotenv from "dotenv";
 import { initDb } from "./db.js";
 import callsRouter from "./routes/calls.js";
+import searchRouter from "./routes/search.js";
 import { initQueue } from "./queues/callQueue.js";
 import { startWorker } from "./workers/callWorker.js";
 
@@ -20,6 +21,7 @@ app.use(express.json());
 
 // ─── Routes ───────────────────────────────────────────────────────────────────
 app.use("/api/calls", callsRouter);
+app.use("/api/search", searchRouter);
 
 app.get("/health", (_req, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });

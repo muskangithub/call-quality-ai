@@ -125,6 +125,15 @@ router.get("/", async (_req: Request, res: Response): Promise<void> => {
         duration_sec   AS "durationSec",
         status,
         error_message  AS "errorMessage",
+        summary,
+        (scorecard->>'overall')::float                   AS "overallScore",
+        COALESCE(jsonb_array_length(emotion->'events'), 0) AS "eventCount",
+        (
+          SELECT COUNT(*)
+          FROM jsonb_array_elements(emotion->'events') AS ev
+          WHERE ev->>'type' IN ('escalation', 'mismatch')
+        )                                                AS "negativeEventCount",
+        COALESCE(jsonb_array_length(scorecard->'flags'), 0) AS "flagCount",
         uploaded_at    AS "uploadedAt",
         updated_at     AS "updatedAt"
       FROM calls
@@ -153,6 +162,11 @@ router.get("/:id", async (req: Request, res: Response): Promise<void> => {
          duration_sec   AS "durationSec",
          status,
          error_message  AS "errorMessage",
+         transcript,
+         diarization,
+         summary,
+         scorecard,
+         emotion,
          uploaded_at    AS "uploadedAt",
          updated_at     AS "updatedAt"
        FROM calls
@@ -169,6 +183,64 @@ router.get("/:id", async (req: Request, res: Response): Promise<void> => {
   } catch (err) {
     console.error("Get call error:", err);
     res.status(500).json({ error: "Failed to fetch call" });
+  }
+});
+
+// ─── GET /api/calls/:id/audio ─────────────────────────────────────────────────
+// Streams the audio file with HTTP range support so the player can seek.
+router.get("/:id/audio", async (req: Request, res: Response): Promise<void> => {
+  const { id } = req.params;
+
+  try {
+    const result = await pool.query<{ file_path: string; mime_type: string }>(
+      `SELECT file_path, mime_type FROM calls WHERE id = $1`,
+      [id]
+    );
+
+    const row = result.rows[0];
+    if (!row) {
+      res.status(404).json({ error: "Call not found" });
+      return;
+    }
+
+    const filePath = row.file_path;
+    if (!fs.existsSync(filePath)) {
+      res.status(404).json({ error: "Audio file not found on disk" });
+      return;
+    }
+
+    const stat = fs.statSync(filePath);
+    const fileSize = stat.size;
+    const range = req.headers.range;
+    const mimeType = row.mime_type || "audio/mpeg";
+
+    if (range) {
+      // Partial content — needed for seeking/scrubbing in the player
+      const parts = range.replace(/bytes=/, "").split("-");
+      const start = parseInt(parts[0] ?? "0", 10);
+      const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+      const chunkSize = end - start + 1;
+
+      res.writeHead(206, {
+        "Content-Range": `bytes ${start}-${end}/${fileSize}`,
+        "Accept-Ranges": "bytes",
+        "Content-Length": chunkSize,
+        "Content-Type": mimeType,
+      });
+
+      fs.createReadStream(filePath, { start, end }).pipe(res);
+    } else {
+      // Full file
+      res.writeHead(200, {
+        "Content-Length": fileSize,
+        "Content-Type": mimeType,
+        "Accept-Ranges": "bytes",
+      });
+      fs.createReadStream(filePath).pipe(res);
+    }
+  } catch (err) {
+    console.error("Audio stream error:", err);
+    res.status(500).json({ error: "Failed to stream audio" });
   }
 });
 
