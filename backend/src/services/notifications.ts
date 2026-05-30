@@ -10,10 +10,9 @@ dotenv.config();
  * - When processing fails, the right person is notified immediately
  * - The alert carries enough context to act on: Call ID, reason, timestamp
  *
- * This module fans out a single failure event to every configured channel.
+ * Channels: console (always on) + email (if SMTP is configured).
  * Console logging always happens as a guaranteed fallback so a failure is
- * NEVER silent — which is exactly what the spec asks for. Email fires when
- * SMTP is configured.
+ * NEVER silent — exactly what the spec asks for.
  */
 
 export interface FailureContext {
@@ -59,51 +58,6 @@ function notifyConsole(ctx: FailureContext): void {
   );
 }
 
-// ─── Channel: Slack (incoming webhook) ───────────────────────────────────────
-async function notifySlack(ctx: FailureContext): Promise<void> {
-  const webhookUrl = process.env["SLACK_WEBHOOK_URL"];
-  if (!webhookUrl) return;
-
-  const payload = {
-    text: `🚨 *Call Processing Failed*`,
-    blocks: [
-      {
-        type: "header",
-        text: { type: "plain_text", text: "🚨 Call Processing Failed" },
-      },
-      {
-        type: "section",
-        fields: [
-          { type: "mrkdwn", text: `*Call ID:*\n${ctx.callId}` },
-          { type: "mrkdwn", text: `*File:*\n${ctx.fileName}` },
-          { type: "mrkdwn", text: `*Stage:*\n${ctx.stage ?? "unknown"}` },
-          { type: "mrkdwn", text: `*Attempts:*\n${ctx.attemptsMade ?? "?"}` },
-          { type: "mrkdwn", text: `*Time:*\n${ctx.timestamp}` },
-        ],
-      },
-      {
-        type: "section",
-        text: { type: "mrkdwn", text: `*Reason:*\n\`\`\`${ctx.reason}\`\`\`` },
-      },
-    ],
-  };
-
-  try {
-    const res = await fetch(webhookUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    if (!res.ok) {
-      console.error(`[Notify] Slack returned ${res.status}`);
-    } else {
-      console.log("[Notify] Slack alert sent");
-    }
-  } catch (err) {
-    console.error("[Notify] Slack send failed:", (err as Error).message);
-  }
-}
-
 // ─── Channel: Email ──────────────────────────────────────────────────────────
 async function notifyEmail(ctx: FailureContext): Promise<void> {
   const transport = getMailTransport();
@@ -138,11 +92,11 @@ async function notifyEmail(ctx: FailureContext): Promise<void> {
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 /**
- * Notify all configured channels of a processing failure.
- * Console always fires; Slack/email fire only if configured.
- * Channel sends run concurrently and never throw (best-effort).
+ * Notify on a processing failure.
+ * Console always fires; email fires only if SMTP is configured.
+ * Sends are best-effort and never throw.
  */
 export async function notifyFailure(ctx: FailureContext): Promise<void> {
   notifyConsole(ctx);
-  await Promise.allSettled([notifySlack(ctx), notifyEmail(ctx)]);
+  await notifyEmail(ctx);
 }
