@@ -3,6 +3,8 @@ import cors from "cors";
 import dotenv from "dotenv";
 import { initDb } from "./db.js";
 import callsRouter from "./routes/calls.js";
+import { initQueue } from "./queues/callQueue.js";
+import { startWorker } from "./workers/callWorker.js";
 
 dotenv.config();
 
@@ -27,7 +29,6 @@ app.get("/health", (_req, res) => {
 app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
   console.error("Unhandled error:", err.message);
 
-  // Multer errors (file size, wrong type) come through here
   if (err.message.startsWith("Unsupported file type") || err.message.includes("File too large")) {
     res.status(400).json({ error: err.message });
     return;
@@ -39,8 +40,19 @@ app.use((err: Error, _req: express.Request, res: express.Response, _next: expres
 // ─── Boot ─────────────────────────────────────────────────────────────────────
 async function start(): Promise<void> {
   await initDb();
+
+  // Try to connect to Redis — if unavailable, server still works (uploads save to DB)
+  const redisAvailable = await initQueue();
+  if (redisAvailable) {
+    startWorker();
+  } else {
+    console.warn("⚠️  Redis not available — background processing disabled.");
+    console.warn("   Uploads will save to DB but won't be processed automatically.");
+    console.warn("   Start Redis and restart the server to enable processing.");
+  }
+
   app.listen(PORT, () => {
-    console.log(`Backend running on http://localhost:${PORT}`);
+    console.log(`\nBackend running on http://localhost:${PORT}`);
   });
 }
 

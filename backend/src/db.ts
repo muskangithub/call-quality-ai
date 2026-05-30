@@ -30,12 +30,26 @@ export async function initDb(): Promise<void> {
       status        TEXT NOT NULL DEFAULT 'uploaded',
       -- status values: uploaded | transcribing | analysing | completed | failed
       error_message TEXT,
+      transcript    JSONB,
       uploaded_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
 
     CREATE INDEX IF NOT EXISTS idx_calls_status ON calls(status);
     CREATE INDEX IF NOT EXISTS idx_calls_uploaded_at ON calls(uploaded_at DESC);
+  `);
+
+  // Add transcript column if table already existed without it
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'calls' AND column_name = 'transcript'
+      ) THEN
+        ALTER TABLE calls ADD COLUMN transcript JSONB;
+      END IF;
+    END $$;
   `);
 
   console.log("Database initialised");

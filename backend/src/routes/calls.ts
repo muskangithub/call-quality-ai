@@ -3,6 +3,7 @@ import multer from "multer";
 import path from "path";
 import fs from "fs";
 import { pool } from "../db.js";
+import { getCallQueue } from "../queues/callQueue.js";
 
 const router = Router();
 
@@ -74,6 +75,23 @@ router.post(
       );
 
       const callId = result.rows[0]?.id;
+
+      // Enqueue for background processing (non-blocking)
+      const queue = getCallQueue();
+      if (queue) {
+        await queue.add(
+          "process-call",
+          {
+            callId: callId!,
+            filePath,
+            originalName: originalname,
+            mimeType: mimetype,
+          },
+          { jobId: callId! }
+        );
+      } else {
+        console.warn(`[Upload] Redis unavailable — call ${callId} saved but not queued for processing`);
+      }
 
       res.status(201).json({
         id: callId,
